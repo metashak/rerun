@@ -14,7 +14,7 @@ use super::latest_at_idx;
 use crate::{
     resource_managers::GpuTexture2D,
     video::{DecodingError, FrameDecodingResult},
-    RenderContext,
+    DebugLabel, RenderContext,
 };
 
 #[derive(Clone)]
@@ -47,6 +47,8 @@ pub struct VideoDecoder {
     last_used_frame_timestamp: TimeMs,
     current_segment_idx: usize,
     current_sample_idx: usize,
+
+    error_on_last_frame_at: bool,
 }
 
 // SAFETY: There is no way to access the same JS object from different OS threads
@@ -118,10 +120,40 @@ impl VideoDecoder {
             last_used_frame_timestamp: TimeMs::new(f64::MAX),
             current_segment_idx: usize::MAX,
             current_sample_idx: usize::MAX,
+
+            error_on_last_frame_at: false,
         })
     }
 
-    pub fn frame_at(&mut self, timestamp: TimeMs) -> FrameDecodingResult {
+    pub fn frame_at(
+        &mut self,
+        render_ctx: &RenderContext,
+        timestamp: TimeMs,
+    ) -> FrameDecodingResult {
+        let result = self.decode_frame_at(timestamp);
+        match &result {
+            FrameDecodingResult::Ready(_) => {
+                self.error_on_last_frame_at = false;
+            }
+            FrameDecodingResult::Pending(_) => {
+                if self.error_on_last_frame_at {
+                    // If we switched from error to pending, clear the texture.
+                    // This is important to avoid flickering, in particular when switching from
+                    // benign errors like DecodingError::NegativeTimestamp.
+                    // If we don't do this, we see the last valid texture which can look really weird.
+                    self.clear_video_texture(render_ctx);
+                }
+
+                self.error_on_last_frame_at = false;
+            }
+            FrameDecodingResult::Error(_) => {
+                self.error_on_last_frame_at = true;
+            }
+        }
+        result
+    }
+
+    fn decode_frame_at(&mut self, timestamp: TimeMs) -> FrameDecodingResult {
         if timestamp < TimeMs::ZERO {
             return FrameDecodingResult::Error(DecodingError::NegativeTimestamp);
         }
@@ -216,6 +248,30 @@ impl VideoDecoder {
         }
 
         FrameDecodingResult::Ready(self.texture.clone())
+    }
+
+    /// Clears the texture that is shown on pending to black.
+    fn clear_video_texture(&self, render_ctx: &RenderContext) {
+        // Clear texture is a native only feature, so let's not do that.
+        // before_view_builder_encoder.clear_texture(texture, subresource_range);
+
+        // But our target is also a render target, so just create a dummy renderpass with clear.
+        let mut before_view_builder_encoder =
+            render_ctx.active_frame.before_view_builder_encoder.lock();
+        let _ = before_view_builder_encoder
+            .get()
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: DebugLabel::from("clear_video_texture").get(),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.texture.default_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations::<wgpu::Color> {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
     }
 
     /// Enqueue all samples in the given segment.
