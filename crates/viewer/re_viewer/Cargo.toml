@@ -36,6 +36,9 @@ default = ["analytics"]
 ## Enable telemetry using our analytics SDK.
 analytics = ["dep:re_analytics"]
 
+## Enable the rrdp data source.
+rrdp = ["re_data_source/rrdp"]
+
 
 [dependencies]
 # Internal:
