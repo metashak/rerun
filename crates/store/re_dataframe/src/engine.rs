@@ -46,6 +46,16 @@ pub struct QueryEngineWriteGuard<'a> {
     pub cache: parking_lot::RwLockWriteGuard<'a, QueryCache>,
 }
 
+impl<'a> QueryEngineWriteGuard<'a> {
+    #[inline]
+    pub fn downgrade(self) -> QueryEngineReadGuard<'a> {
+        QueryEngineReadGuard {
+            store: parking_lot::RwLockWriteGuard::downgrade(self.store),
+            cache: parking_lot::RwLockWriteGuard::downgrade(self.cache),
+        }
+    }
+}
+
 pub struct QueryEngineArcReadGuard {
     pub store: parking_lot::ArcRwLockReadGuard<parking_lot::RawRwLock, ChunkStore>,
     pub cache: parking_lot::ArcRwLockReadGuard<parking_lot::RawRwLock, QueryCache>,
@@ -54,6 +64,16 @@ pub struct QueryEngineArcReadGuard {
 pub struct QueryEngineArcWriteGuard {
     pub store: parking_lot::ArcRwLockWriteGuard<parking_lot::RawRwLock, ChunkStore>,
     pub cache: parking_lot::ArcRwLockWriteGuard<parking_lot::RawRwLock, QueryCache>,
+}
+
+impl QueryEngineArcWriteGuard {
+    #[inline]
+    pub fn downgrade(self) -> QueryEngineArcReadGuard {
+        QueryEngineArcReadGuard {
+            store: parking_lot::ArcRwLockWriteGuard::downgrade(self.store),
+            cache: parking_lot::ArcRwLockWriteGuard::downgrade(self.cache),
+        }
+    }
 }
 
 impl QueryEngine {
