@@ -127,10 +127,12 @@ mode sets the default time range to _everything_. You can override this in the s
         let state = state.downcast_mut::<DataframeSpaceViewState>()?;
         let view_query = view_query::Query::from_blueprint(ctx, query.space_view_id);
 
-        let query_engine = re_dataframe::QueryEngine {
-            store: ctx.recording().store().clone(),
-            cache: ctx.recording().query_caches().clone(),
-        };
+        // TODO: this most definitely goes away -- we should already be getting an engine here.
+        // Not only that, we should be getting an engine _guard_.
+        let query_engine = re_dataframe::QueryEngine::new(
+            ctx.recording().store().clone(),
+            ctx.recording().query_caches().clone(),
+        );
 
         let view_contents = query
             .iter_all_entities()

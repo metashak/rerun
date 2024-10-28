@@ -8,6 +8,7 @@ use re_chunk_store::{
     ChunkStore, ChunkStoreChunkStats, ChunkStoreConfig, ChunkStoreEvent, ChunkStoreHandle,
     ChunkStoreSubscriber, GarbageCollectionOptions, GarbageCollectionTarget,
 };
+use re_dataframe::QueryEngine;
 use re_log_types::{
     ApplicationId, EntityPath, EntityPathHash, LogMsg, ResolvedTimeRange, ResolvedTimeRangeF,
     SetStoreInfo, StoreId, StoreInfo, StoreKind, Timeline,
@@ -118,11 +119,9 @@ impl EntityDb {
     }
 
     #[inline]
-    pub fn query_engine(&self) -> re_dataframe::QueryEngine {
-        re_dataframe::QueryEngine {
-            store: self.store().clone(),
-            cache: self.query_caches().clone(),
-        }
+    pub fn query_engine(&self) -> QueryEngine {
+        // TODO: replace the self one with this
+        QueryEngine::new(self.store().clone(), self.query_caches().clone())
     }
 
     /// Queries for the given `component_names` using latest-at semantics.

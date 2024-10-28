@@ -162,14 +162,13 @@ impl QueryHandle {
     fn init_(&self) -> QueryHandleState {
         re_tracing::profile_scope!("init");
 
-        let store = self.engine.store.read();
-        let query_cache = self.engine.cache.read();
+        let engine = self.engine.read();
 
         // The timeline doesn't matter if we're running in static-only mode.
         let filtered_index = self.query.filtered_index.unwrap_or_default();
 
         // 1. Compute the schema for the query.
-        let view_contents = store.schema_for_query(&self.query);
+        let view_contents = engine.store.schema_for_query(&self.query);
 
         // 2. Compute the schema of the selected contents.
         //
@@ -329,7 +328,7 @@ impl QueryHandle {
                         let query =
                             re_chunk::LatestAtQuery::new(Timeline::default(), TimeInt::STATIC);
 
-                        let results = query_cache.latest_at(
+                        let results = engine.cache.latest_at(
                             &query,
                             &descr.entity_path,
                             [descr.component_name],
@@ -590,8 +589,8 @@ impl QueryHandle {
         // not so much in an SDK context. Make it configurable.
         let results = self
             .engine
-            .cache
             .read()
+            .cache
             .range(query, entity_path, component_names);
 
         debug_assert!(
@@ -798,7 +797,7 @@ impl QueryHandle {
     pub fn next_row(&self) -> Option<Vec<Box<dyn ArrowArray>>> {
         re_tracing::profile_function!();
 
-        let query_cache = self.engine.cache.read();
+        let engine = self.engine.read();
 
         /// Temporary state used to resolve the streaming join for the current iteration.
         #[derive(Debug)]
@@ -1002,7 +1001,9 @@ impl QueryHandle {
                         re_chunk::LatestAtQuery::new(state.filtered_index, *cur_index_value);
 
                     let results =
-                        query_cache.latest_at(&query, &descr.entity_path, [descr.component_name]);
+                        engine
+                            .cache
+                            .latest_at(&query, &descr.entity_path, [descr.component_name]);
 
                     *streaming_state = results
                         .components

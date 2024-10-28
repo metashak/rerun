@@ -1,7 +1,7 @@
 use re_chunk::{EntityPath, TransportChunk};
-use re_chunk_store::{ChunkStoreHandle, ColumnDescriptor, QueryExpression};
+use re_chunk_store::{ChunkStore, ChunkStoreHandle, ColumnDescriptor, QueryExpression};
 use re_log_types::EntityPathFilter;
-use re_query::QueryCacheHandle;
+use re_query::{QueryCache, QueryCacheHandle};
 
 use crate::QueryHandle;
 
@@ -26,13 +26,76 @@ pub type RecordBatch = TransportChunk;
 /// See the following methods:
 /// * [`QueryEngine::schema`]: get the complete schema of the recording.
 /// * [`QueryEngine::query`]: execute a [`QueryExpression`] on the recording.
+//
+// TODO: this should be StorageEngine
 #[derive(Clone)]
 pub struct QueryEngine {
-    pub store: ChunkStoreHandle,
-    pub cache: QueryCacheHandle,
+    store: ChunkStoreHandle,
+    cache: QueryCacheHandle,
+}
+
+// TODO: explain why these exist -> multiple reasons
+
+pub struct QueryEngineReadGuard<'a> {
+    pub store: parking_lot::RwLockReadGuard<'a, ChunkStore>,
+    pub cache: parking_lot::RwLockReadGuard<'a, QueryCache>,
+}
+
+pub struct QueryEngineWriteGuard<'a> {
+    pub store: parking_lot::RwLockWriteGuard<'a, ChunkStore>,
+    pub cache: parking_lot::RwLockWriteGuard<'a, QueryCache>,
+}
+
+pub struct QueryEngineArcReadGuard {
+    pub store: parking_lot::ArcRwLockReadGuard<parking_lot::RawRwLock, ChunkStore>,
+    pub cache: parking_lot::ArcRwLockReadGuard<parking_lot::RawRwLock, QueryCache>,
+}
+
+pub struct QueryEngineArcWriteGuard {
+    pub store: parking_lot::ArcRwLockWriteGuard<parking_lot::RawRwLock, ChunkStore>,
+    pub cache: parking_lot::ArcRwLockWriteGuard<parking_lot::RawRwLock, QueryCache>,
 }
 
 impl QueryEngine {
+    #[inline]
+    pub fn read(&self) -> QueryEngineReadGuard<'_> {
+        QueryEngineReadGuard {
+            cache: self.cache.read(),
+            store: self.store.read(),
+        }
+    }
+
+    #[inline]
+    pub fn write(&self) -> QueryEngineWriteGuard<'_> {
+        QueryEngineWriteGuard {
+            cache: self.cache.write(),
+            store: self.store.write(),
+        }
+    }
+
+    #[inline]
+    pub fn read_arc(&self) -> QueryEngineArcReadGuard {
+        QueryEngineArcReadGuard {
+            cache: self.cache.read_arc(),
+            store: self.store.read_arc(),
+        }
+    }
+
+    #[inline]
+    pub fn write_arc(&self) -> QueryEngineArcWriteGuard {
+        QueryEngineArcWriteGuard {
+            cache: self.cache.write_arc(),
+            store: self.store.write_arc(),
+        }
+    }
+}
+
+impl QueryEngine {
+    // TODO
+    pub fn new(store: ChunkStoreHandle, cache: QueryCacheHandle) -> Self {
+        Self { store, cache }
+    }
+
     /// Returns the full schema of the store.
     ///
     /// This will include a column descriptor for every timeline and every component on every

@@ -48,23 +48,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         VersionPolicy::Warn,
     )?
     .into_iter()
-    .map(|(store_id, store)| (store_id, ChunkStoreHandle::new(store)));
+    .map(|(store_id, store)| {
+        let store = ChunkStoreHandle::new(store);
+        let cache = QueryCacheHandle::new(QueryCache::new(store.clone()));
+        (store_id, QueryEngine::new(store, cache))
+    });
 
-    for (store_id, store) in stores {
+    for (store_id, engine) in stores {
         if store_id.kind != StoreKind::Recording {
             continue;
         }
 
-        let query_cache = QueryCacheHandle::new(QueryCache::new(store.clone()));
-        let query_engine = QueryEngine {
-            store: store.clone(),
-            cache: query_cache.clone(),
-        };
-
         let query = QueryExpression {
             filtered_index: Some(timeline),
             view_contents: Some(
-                query_engine
+                engine
                     .iter_entity_paths(&entity_path_filter)
                     .map(|entity_path| (entity_path, None))
                     .collect(),
@@ -73,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         };
 
-        let query_handle = query_engine.query(query.clone());
+        let query_handle = engine.query(query.clone());
         let record_batches = query_handle.batch_iter().take(10).collect_vec();
 
         let table = concatenate_record_batches(query_handle.schema().clone(), &record_batches)?;
