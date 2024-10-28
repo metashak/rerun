@@ -84,7 +84,7 @@ pub mod av1;
 pub mod async_decoder;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use async_decoder::AsyncDecoder;
+pub use async_decoder::{AsyncDecoder, AsyncDecoderWrapper};
 
 #[cfg(feature = "ffmpeg")]
 #[cfg(not(target_arch = "wasm32"))]
@@ -139,11 +139,13 @@ pub trait SyncDecoder {
     fn reset(&mut self) {}
 }
 
+// TODO: this is only used in an example right now but also somewhat broken.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn new_decoder(
     debug_name: String,
     video: &crate::VideoData,
-) -> Result<Box<dyn SyncDecoder + Send + 'static>> {
+    on_output: impl Fn(Result<Frame>) + Send + Sync + 'static,
+) -> Result<Box<dyn AsyncDecoder>> {
     #![allow(unused_variables, clippy::needless_return)] // With some feature flags
 
     re_log::trace!(
@@ -165,7 +167,11 @@ pub fn new_decoder(
                     return Err(Error::NoNativeAv1Debug); // because debug builds of rav1d is EXTREMELY slow
                 } else {
                     re_log::trace!("Decoding AV1…");
-                    return Ok(Box::new(av1::SyncDav1dDecoder::new(debug_name)?));
+                    return Ok(Box::new(AsyncDecoderWrapper::new(
+                        debug_name.clone(),
+                        Box::new(av1::SyncDav1dDecoder::new(debug_name)?),
+                        on_output,
+                    )));
                 }
             }
         }
@@ -175,6 +181,7 @@ pub fn new_decoder(
             // TODO: check if we have ffmpeg ONCE, and remember
             Ok(Box::new(ffmpeg::FfmpegCliH264Decoder::new(
                 avc1_box.clone(),
+                on_output,
             )?))
         }
 

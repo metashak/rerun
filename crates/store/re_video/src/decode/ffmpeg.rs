@@ -1,6 +1,6 @@
 //! Send video data to `ffmpeg` over CLI to decode it.
 
-use std::{collections::BTreeMap, io::Write, sync::atomic::Ordering};
+use std::{collections::BTreeMap, io::Write, sync::Arc};
 
 use crossbeam::channel::{Receiver, Sender};
 use ffmpeg_sidecar::{
@@ -10,7 +10,7 @@ use ffmpeg_sidecar::{
 
 use crate::Time;
 
-use super::{Frame, SyncDecoder};
+use super::{AsyncDecoder, Frame, OutputCallback};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -57,16 +57,18 @@ pub struct FfmpegCliH264Decoder {
     /// For sending frame timestamps to the decoder thread
     frame_info_tx: Sender<FrameInfo>,
 
-    /// How we receive new frames back from ffmpeg
-    frame_rx: Receiver<super::Result<Frame>>,
-
     avcc: re_mp4::Avc1Box,
+
+    on_output: Arc<OutputCallback>,
 }
 
 impl FfmpegCliH264Decoder {
     // TODO: make this robust against `pkill ffmpeg` somehow.
     // Maybe `AsyncDecoder` can auto-restart us, or we wrap ourselves in a new struct that restarts us on certain errors?
-    pub fn new(avcc: re_mp4::Avc1Box) -> Result<Self, Error> {
+    pub fn new(
+        avcc: re_mp4::Avc1Box,
+        on_output: impl Fn(super::Result<Frame>) + Send + Sync + 'static,
+    ) -> Result<Self, Error> {
         re_tracing::profile_function!();
 
         let mut ffmpeg = {
@@ -109,13 +111,17 @@ impl FfmpegCliH264Decoder {
             .map_err(|err| Error::NoIterator(err.to_string()))?;
 
         let (frame_info_tx, frame_info_rx) = crossbeam::channel::unbounded();
-        let (frame_tx, frame_rx) = crossbeam::channel::unbounded();
+
+        let on_output = Arc::new(on_output);
 
         std::thread::Builder::new()
             .name("ffmpeg-reader".to_owned())
-            .spawn(move || {
-                read_ffmpeg_output(ffmpeg_iterator, &frame_info_rx, &frame_tx);
-                re_log::debug!("Shutting down ffmpeg");
+            .spawn({
+                let on_output = on_output.clone();
+                move || {
+                    read_ffmpeg_output(ffmpeg_iterator, &frame_info_rx, on_output.as_ref());
+                    re_log::debug!("Shutting down ffmpeg");
+                }
             })
             .expect("Failed to spawn ffmpeg thread");
 
@@ -123,8 +129,8 @@ impl FfmpegCliH264Decoder {
             frame_num: 0,
             ffmpeg_stdin,
             frame_info_tx,
-            frame_rx,
             avcc,
+            on_output,
         })
     }
 }
@@ -132,7 +138,7 @@ impl FfmpegCliH264Decoder {
 fn read_ffmpeg_output(
     ffmpeg_iterator: ffmpeg_sidecar::iter::FfmpegIterator,
     frame_info_rx: &Receiver<FrameInfo>,
-    frame_tx: &Sender<super::Result<Frame>>,
+    on_output: &OutputCallback,
 ) {
     /// Ignore some common output from ffmpeg:
     fn should_ignore_log_msg(msg: &str) -> bool {
@@ -171,7 +177,7 @@ fn read_ffmpeg_output(
             }
 
             FfmpegEvent::Log(LogLevel::Error, msg) => {
-                frame_tx.send(Err(Error::Ffmpeg(msg).into())).ok();
+                on_output(Err(Error::Ffmpeg(msg).into()));
             }
 
             FfmpegEvent::LogEOF => {
@@ -180,7 +186,7 @@ fn read_ffmpeg_output(
             }
 
             FfmpegEvent::Error(error) => {
-                frame_tx.send(Err(Error::FfmpegSidecar(error).into())).ok();
+                on_output(Err(Error::FfmpegSidecar(error).into()));
             }
 
             // Usefuless info in these:
@@ -278,20 +284,14 @@ fn read_ffmpeg_output(
                 debug_assert_eq!(pix_fmt, "rgb24");
                 debug_assert_eq!(width as usize * height as usize * 3, data.len());
 
-                if frame_tx
-                    .send(Ok(super::Frame {
-                        width,
-                        height,
-                        data,
-                        format: crate::PixelFormat::Rgb8Unorm,
-                        composition_timestamp: frame_info.presentation_timestamp,
-                        duration: frame_info.duration,
-                    }))
-                    .is_err()
-                {
-                    re_log::debug!("Receiver disconnected");
-                    return;
-                }
+                on_output(Ok(super::Frame {
+                    width,
+                    height,
+                    data,
+                    format: crate::PixelFormat::Rgb8Unorm,
+                    composition_timestamp: frame_info.presentation_timestamp,
+                    duration: frame_info.duration,
+                }));
             }
 
             FfmpegEvent::Done => {
@@ -306,23 +306,9 @@ fn read_ffmpeg_output(
     }
 }
 
-impl SyncDecoder for FfmpegCliH264Decoder {
-    fn submit_chunk(
-        &mut self,
-        should_stop: &std::sync::atomic::AtomicBool,
-        chunk: super::Chunk,
-        on_output: &super::OutputCallback,
-    ) {
+impl AsyncDecoder for FfmpegCliH264Decoder {
+    fn decode(&mut self, chunk: super::Chunk) {
         re_tracing::profile_function!();
-
-        // First read any outstanding messages (e.g. error reports),
-        // so they get ordered correctly.
-        while let Ok(frame_result) = self.frame_rx.try_recv() {
-            if should_stop.load(Ordering::Relaxed) {
-                return;
-            }
-            on_output(frame_result);
-        }
 
         // We send the information about this chunk first.
         // This assumes each sample/chunk will result in exactly one frame.
@@ -343,28 +329,26 @@ impl SyncDecoder for FfmpegCliH264Decoder {
             // Write chunk to ffmpeg:
             let mut state = NaluStreamState::default(); // TODO: remove state?
             if let Err(err) = write_avc_chunk_to_nalu_stream(
-                should_stop,
                 &self.avcc,
                 &mut self.ffmpeg_stdin,
                 &chunk,
                 &mut state,
             ) {
-                on_output(Err(err.into()));
+                (self.on_output)(Err(err.into()));
             }
 
             self.ffmpeg_stdin.flush().ok();
-        }
-
-        while let Ok(frame_result) = self.frame_rx.try_recv() {
-            if should_stop.load(Ordering::Relaxed) {
-                return;
-            }
-            on_output(frame_result);
         }
     }
 
     fn reset(&mut self) {
         // TODO: restart ffmpeg process
+    }
+}
+
+impl Drop for FfmpegCliH264Decoder {
+    fn drop(&mut self) {
+        // TODO: stop ffmpeg thread
     }
 }
 
@@ -381,7 +365,6 @@ struct NaluStreamState {
 }
 
 fn write_avc_chunk_to_nalu_stream(
-    should_stop: &std::sync::atomic::AtomicBool,
     avcc: &re_mp4::Avc1Box,
     nalu_stream: &mut dyn std::io::Write,
     chunk: &super::Chunk,
@@ -419,7 +402,7 @@ fn write_avc_chunk_to_nalu_stream(
     // (most of the time it's 1:1, but there might be extra NAL units for info, especially at the start).
     let mut buffer_offset: usize = 0;
     let sample_end = chunk.data.len();
-    while buffer_offset < sample_end && !should_stop.load(Ordering::Relaxed) {
+    while buffer_offset < sample_end {
         re_tracing::profile_scope!("write_nalu");
 
         // Each NAL unit in mp4 is prefixed with a length prefix.
@@ -493,7 +476,7 @@ fn write_avc_chunk_to_nalu_stream(
 /// Possible values for `nal_unit_type` field in `nal_unit`.
 ///
 /// Encodes to 5 bits.
-/// Via: https://docs.rs/less-avc/0.1.5/src/less_avc/nal_unit.rs.html#232
+/// Via: <https://docs.rs/less-avc/0.1.5/src/less_avc/nal_unit.rs.html#232/>
 #[derive(PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u8)]
